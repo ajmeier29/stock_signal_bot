@@ -11,8 +11,8 @@ import pytz
 LIVE_MODE = False  # Set False for backtest with plotting
 ASSET_TYPE = "crypto"
 STARTING_CASH = 10000
-START = '2025-04-21'
-END = '2025-04-24'
+START = '2025-01-01'
+END = '2025-04-21'
 ALERT_TIME = 500  # Only send alerts if the signal occurred within the last X minutes, where X is this value
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,6 +38,8 @@ async def send_telegram_message(message):
         print(message)
 
 def send_sync(message):
+    if not LIVE_MODE:
+        return
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(send_telegram_message(message))
@@ -53,11 +55,12 @@ class PandasData(bt.feeds.PandasData):
     params = dict(datetime=None, open='Open', high='High', low='Low', close='Close', volume='Volume', openinterest=-1)
 
 class CombinedStrategy(bt.Strategy):
-    params = dict(fast_ema=9, slow_ema=21)
+    params = dict(fast_ema=9, slow_ema=21, rsi_period=14, rsi_upper=70, rsi_lower=30)
 
     def __init__(self):
         self.ema_fast = {d: bt.ind.EMA(d.close, period=self.p.fast_ema) for d in self.datas}
         self.ema_slow = {d: bt.ind.EMA(d.close, period=self.p.slow_ema) for d in self.datas}
+        self.rsi = {d: bt.ind.RSI(d.close, period=self.p.rsi_period) for d in self.datas}
         self.signal_sent = {}  # {symbol: (signal_type, timestamp)}
 
     def already_sent(self, symbol, signal_type, timestamp):
@@ -66,7 +69,7 @@ class CombinedStrategy(bt.Strategy):
 
     def notify_order(self, order):
         if order.status in [order.Completed] and order.executed.dt:
-            order_time = order.executed.dt.datetime()
+            order_time = bt.num2date(order.executed.dt)
             now_utc = datetime.now(timezone.utc)
             if (order_time.date() == now_utc.date() and
                 order_time.hour == now_utc.hour and
@@ -79,37 +82,41 @@ class CombinedStrategy(bt.Strategy):
                 send_sync(msg)
 
     def next(self):
-        now_utc = datetime.now(timezone.utc)
         for d in self.datas:
             symbol = d._name
             bar_time = d.datetime.datetime(0).replace(tzinfo=timezone.utc)
-            if bar_time.date() != now_utc.date() or bar_time.hour != now_utc.hour or (now_utc.minute - bar_time.minute) % 60 >= ALERT_TIME:
-                continue  # Skip past bars
+
+            if LIVE_MODE and (
+                bar_time.date() != datetime.now(timezone.utc).date() or
+                bar_time.hour != datetime.now(timezone.utc).hour or
+                (datetime.now(timezone.utc).minute - bar_time.minute) % 60 >= ALERT_TIME
+            ):
+                continue
 
             ema_fast = self.ema_fast[d][0]
             ema_slow = self.ema_slow[d][0]
             price = d.close[0]
             timestamp = d.datetime.datetime(0)
 
-            if ema_fast > ema_slow and not self.already_sent(symbol, 'LONG', timestamp):
+            if ema_fast > ema_slow and self.signal_sent.get(symbol) != 'LONG':
                 self.buy(data=d)
-                self.signal_sent[symbol] = ('LONG', timestamp)
-                send_sync(f"🚀 *BUY SIGNAL TRIGGERED!*\nAsset: `{symbol}`\nTime: _{format_time(d.datetime)}_\n")
+                self.signal_sent[symbol] = 'LONG'
+                send_sync(f"🚀 *BUY SIGNAL TRIGGERED!* Asset: `{symbol}` Time: _{format_time(d.datetime)}_")
 
-            elif ema_fast < ema_slow and not self.already_sent(symbol, 'SHORT', timestamp):
+            elif ema_fast < ema_slow and self.signal_sent.get(symbol) != 'SHORT':
                 self.sell(data=d)
-                self.signal_sent[symbol] = ('SHORT', timestamp)
-                send_sync(f"📉 *SHORT SIGNAL TRIGGERED!*\nAsset: `{symbol}`\nTime: _{format_time(d.datetime)}_\n")
+                self.signal_sent[symbol] = 'SHORT'
+                send_sync(f"📉 *SHORT SIGNAL TRIGGERED!* Asset: `{symbol}` Time: _{format_time(d.datetime)}_")
 
-            elif self.signal_sent.get(symbol, (None,))[0] == 'LONG' and ema_fast < ema_slow:
+            elif self.signal_sent.get(symbol) == 'LONG' and ema_fast < ema_slow:
+                self.close(data=d)
+                self.signal_sent[symbol] = None
+                send_sync(f"✅ *EXIT LONG* Asset: `{symbol}` Time: _{format_time(d.datetime)}_")
+
+            elif self.signal_sent.get(symbol) == 'SHORT' and ema_fast > ema_slow:
                 self.close(data=d)
                 self.signal_sent[symbol] = ('NONE', timestamp)
-                send_sync(f"✅ *EXIT LONG*\nAsset: `{symbol}`\nTime: _{format_time(d.datetime)}_\n")
-
-            elif self.signal_sent.get(symbol, (None,))[0] == 'SHORT' and ema_fast > ema_slow:
-                self.close(data=d)
-                self.signal_sent[symbol] = ('NONE', timestamp)
-                send_sync(f"✅ *EXIT SHORT*\nAsset: `{symbol}`\nTime: _{format_time(d.datetime)}_\n")
+                send_sync(f"✅ *EXIT SHORT* Asset: `{symbol}` Time: _{format_time(d.datetime)}_")
 
 def get_data(symbol, start, end):
     try:
@@ -154,6 +161,9 @@ def run():
     print(f"Starting Value: {cerebro.broker.getvalue():.2f}")
     cerebro.run()
     print(f"Final Value: {cerebro.broker.getvalue():.2f}")
+
+    if not LIVE_MODE:
+        cerebro.plot()
 
 if __name__ == '__main__':
     if LIVE_MODE:

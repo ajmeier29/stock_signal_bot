@@ -11,8 +11,8 @@ import pytz
 LIVE_MODE = False
 ASSET_TYPE = "crypto"
 STARTING_CASH = 10000
-START = '2025-04-21'
-END = '2025-04-24'
+START = '2025-01-01'
+END = '2025-04-21'
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TICKER_PATH = os.path.join(BASE_DIR, "tickers.json")
