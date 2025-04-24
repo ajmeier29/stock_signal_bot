@@ -3,16 +3,17 @@ import json
 import pandas as pd
 import backtrader as bt
 from alpaca_trade_api.rest import REST, TimeFrame, TimeFrameUnit
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from telegram import Bot
 import asyncio
 import pytz
 
-LIVE_MODE = False
+LIVE_MODE = False  # Set False for backtest with plotting
 ASSET_TYPE = "crypto"
 STARTING_CASH = 10000
-START = '2025-01-01'
-END = '2025-04-21'
+START = '2025-04-21'
+END = '2025-04-24'
+ALERT_TIME = 500  # Only send alerts if the signal occurred within the last X minutes, where X is this value
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TICKER_PATH = os.path.join(BASE_DIR, "tickers.json")
@@ -26,14 +27,22 @@ alpaca = REST(API_KEY, API_SECRET, BASE_URL)
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-telegram_bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
+# Async message sender
 async def send_telegram_message(message):
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        await telegram_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
     else:
         print("[MOCK] Would send Telegram message:")
         print(message)
+
+def send_sync(message):
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(send_telegram_message(message))
+    except RuntimeError:
+        asyncio.run(send_telegram_message(message))
 
 def format_time(bt_dt):
     est = pytz.timezone("US/Eastern")
@@ -44,41 +53,63 @@ class PandasData(bt.feeds.PandasData):
     params = dict(datetime=None, open='Open', high='High', low='Low', close='Close', volume='Volume', openinterest=-1)
 
 class CombinedStrategy(bt.Strategy):
-    params = dict(fast_ema=9, slow_ema=21, rsi_period=14, rsi_upper=70, rsi_lower=30)
+    params = dict(fast_ema=9, slow_ema=21)
 
     def __init__(self):
         self.ema_fast = {d: bt.ind.EMA(d.close, period=self.p.fast_ema) for d in self.datas}
         self.ema_slow = {d: bt.ind.EMA(d.close, period=self.p.slow_ema) for d in self.datas}
-        self.rsi = {d: bt.ind.RSI(d.close, period=self.p.rsi_period) for d in self.datas}
-        self.signal_sent = {}
-        self.total_pnl = 0
+        self.signal_sent = {}  # {symbol: (signal_type, timestamp)}
+
+    def already_sent(self, symbol, signal_type, timestamp):
+        last = self.signal_sent.get(symbol)
+        return last and last[0] == signal_type and last[1] == timestamp
+
+    def notify_order(self, order):
+        if order.status in [order.Completed] and order.executed.dt:
+            order_time = order.executed.dt.datetime()
+            now_utc = datetime.now(timezone.utc)
+            if (order_time.date() == now_utc.date() and
+                order_time.hour == now_utc.hour and
+                (now_utc.minute - order_time.minute) % 60 < 5):
+                action = 'BUY' if order.isbuy() else 'SELL'
+                symbol = order.data._name
+                price = order.executed.price
+                timestamp = format_time(order.data.datetime)
+                msg = f"*{action} EXECUTED*: `{symbol}` at *${price:.2f}* — _{timestamp}_"
+                send_sync(msg)
 
     def next(self):
+        now_utc = datetime.now(timezone.utc)
         for d in self.datas:
             symbol = d._name
+            bar_time = d.datetime.datetime(0).replace(tzinfo=timezone.utc)
+            if bar_time.date() != now_utc.date() or bar_time.hour != now_utc.hour or (now_utc.minute - bar_time.minute) % 60 >= ALERT_TIME:
+                continue  # Skip past bars
+
             ema_fast = self.ema_fast[d][0]
             ema_slow = self.ema_slow[d][0]
+            price = d.close[0]
+            timestamp = d.datetime.datetime(0)
 
-            if ema_fast > ema_slow and self.signal_sent.get(symbol) != 'LONG':
-                # print(f"LONG SIGNAL: {symbol} at ${d.close[0]:.2f}")
-                self.buy(data=d, exectype=bt.Order.Market)
-                self.signal_sent[symbol] = 'LONG'
+            if ema_fast > ema_slow and not self.already_sent(symbol, 'LONG', timestamp):
+                self.buy(data=d)
+                self.signal_sent[symbol] = ('LONG', timestamp)
+                send_sync(f"🚀 *BUY SIGNAL TRIGGERED!*\nAsset: `{symbol}`\nTime: _{format_time(d.datetime)}_\n")
 
-            elif ema_fast < ema_slow and self.signal_sent.get(symbol) != 'SHORT':
-                # print(f"SHORT SIGNAL: {symbol} at ${d.close[0]:.2f}")
-                self.sell(data=d, exectype=bt.Order.Market)
-                self.signal_sent[symbol] = 'SHORT'
+            elif ema_fast < ema_slow and not self.already_sent(symbol, 'SHORT', timestamp):
+                self.sell(data=d)
+                self.signal_sent[symbol] = ('SHORT', timestamp)
+                send_sync(f"📉 *SHORT SIGNAL TRIGGERED!*\nAsset: `{symbol}`\nTime: _{format_time(d.datetime)}_\n")
 
-            elif self.signal_sent.get(symbol) == 'LONG' and ema_fast < ema_slow:
-                # print(f"EXIT LONG: {symbol} at ${d.close[0]:.2f}")
-                self.close(data=d, exectype=bt.Order.Market)
-                self.signal_sent[symbol] = None
+            elif self.signal_sent.get(symbol, (None,))[0] == 'LONG' and ema_fast < ema_slow:
+                self.close(data=d)
+                self.signal_sent[symbol] = ('NONE', timestamp)
+                send_sync(f"✅ *EXIT LONG*\nAsset: `{symbol}`\nTime: _{format_time(d.datetime)}_\n")
 
-            elif self.signal_sent.get(symbol) == 'SHORT' and ema_fast > ema_slow:
-                # print(f"EXIT SHORT: {symbol} at ${d.close[0]:.2f}")
-                self.close(data=d, exectype=bt.Order.Market)
-                self.signal_sent[symbol] = None
-
+            elif self.signal_sent.get(symbol, (None,))[0] == 'SHORT' and ema_fast > ema_slow:
+                self.close(data=d)
+                self.signal_sent[symbol] = ('NONE', timestamp)
+                send_sync(f"✅ *EXIT SHORT*\nAsset: `{symbol}`\nTime: _{format_time(d.datetime)}_\n")
 
 def get_data(symbol, start, end):
     try:
@@ -101,8 +132,14 @@ def run():
     cerebro.broker.setcash(STARTING_CASH)
     cerebro.addstrategy(CombinedStrategy)
 
-    start = (datetime.utcnow() - timedelta(days=7)).isoformat() if LIVE_MODE else START
-    end = datetime.utcnow().isoformat() if LIVE_MODE else END
+    if LIVE_MODE:
+        start_dt = (datetime.now(timezone.utc) - timedelta(days=2)).replace(microsecond=0)
+        end_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        start = start_dt.isoformat().replace('+00:00', 'Z')
+        end = end_dt.isoformat().replace('+00:00', 'Z')
+    else:
+        start = START
+        end = END
 
     for symbol in TICKERS:
         print(f"[INFO] Fetching data for {symbol} ({ASSET_TYPE})...")
@@ -117,9 +154,6 @@ def run():
     print(f"Starting Value: {cerebro.broker.getvalue():.2f}")
     cerebro.run()
     print(f"Final Value: {cerebro.broker.getvalue():.2f}")
-
-    if not LIVE_MODE:
-        cerebro.plot()
 
 if __name__ == '__main__':
     if LIVE_MODE:
