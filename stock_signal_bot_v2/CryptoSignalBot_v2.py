@@ -12,7 +12,7 @@ from strategies.EMACrossoverStrategy import EMACrossoverStrategy
 from strategies.RSIDivergenceStrategy import RSIDivergenceStrategy
 from strategies.RSIConfirmationStrategy import RSIConfirmationStrategy
 
-ENABLE_SHORTS = True
+ENABLE_SHORTS = False
 SEND_TELLY_MSG = False
 LIVE_MODE = False  # Set False for backtest with plotting
 LIVE_MODE_START = datetime(2025, 4, 18, tzinfo=timezone.utc)      
@@ -218,7 +218,7 @@ class CombinedStrategy(bt.Strategy):
             self.last_direction[symbol] = "LONG"
             self.signal_sent[symbol] = "LONG"
             self.last_executed_signal[symbol] = "LONG"
-        elif signal == "SHORT" and ENABLE_SHORTS:
+        elif signal == "SHORT" and ENABLE_SHORTS or (signal == "SHORT" and self.last_direction[symbol] == "LONG"):
             print(f"[DEBUG] Placing SELL order for {symbol}, size={trade_size}, cash={self.broker.getcash():.2f}")
             self.trade_id_counter[symbol] += 1
             self.active_trade_ids[symbol] = self.trade_id_counter[symbol]
@@ -275,8 +275,7 @@ class CombinedStrategy(bt.Strategy):
 
                     # Only process new, unique signals, and skip SHORT if disabled
                     if signal and signal != last_signal and self.signal_sent.get(symbol) != signal:
-                        if signal == "LONG" or (signal == "SHORT" and ENABLE_SHORTS):
-                            self.process_signal(d, signal, trade_size)
+                        self.process_signal(d, signal, trade_size)
 
             except Exception as e:
                 print(f"[ERROR] {symbol} — {type(e).__name__}: {e}")
