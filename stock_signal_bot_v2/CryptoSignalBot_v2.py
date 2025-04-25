@@ -16,9 +16,9 @@ LIVE_MODE = False  # Set False for backtest with plotting
 LIVE_MODE_START = datetime(2025, 4, 18, tzinfo=timezone.utc)      
 LIVE_MODE_END = datetime.now(timezone.utc).replace(microsecond=0)
 ASSET_TYPE = "crypto"
-TRADE_SIZE = 1.0
+TRADE_SIZE = 0.05
 STARTING_CASH = 5000  # Increased to ensure sufficient funds
-BACKTEST_START = '2025-04-18'          
+BACKTEST_START = '2025-01-18'          
 BACKTEST_END = '2025-04-24'
 TIMEFRAME = TimeFrame(15, TimeFrameUnit.Minute)
 
