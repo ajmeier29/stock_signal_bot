@@ -12,13 +12,14 @@ from strategies.EMACrossoverStrategy import EMACrossoverStrategy
 from strategies.RSIDivergenceStrategy import RSIDivergenceStrategy
 from strategies.RSIConfirmationStrategy import RSIConfirmationStrategy
 
-LIVE_MODE = True  # Set False for backtest with plotting
+LIVE_MODE = False  # Set False for backtest with plotting
 LIVE_MODE_START = datetime(2025, 4, 18, tzinfo=timezone.utc)      
 LIVE_MODE_END = datetime.now(timezone.utc).replace(microsecond=0)
 ASSET_TYPE = "crypto"
-STARTING_CASH = 50000  # Increased to ensure sufficient funds
+TRADE_SIZE = 1.0
+STARTING_CASH = 5000  # Increased to ensure sufficient funds
 BACKTEST_START = '2025-04-18'          
-BACKTEST_END = '2025-04-21'
+BACKTEST_END = '2025-04-24'
 TIMEFRAME = TimeFrame(15, TimeFrameUnit.Minute)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -160,12 +161,12 @@ class CombinedStrategy(bt.Strategy):
         return msg
 
     def notify_order(self, order):
+        symbol = order.data._name
+        trade_id = self.active_trade_ids.get(symbol, '?')
         if order.status == order.Completed:
-            symbol = order.data._name
             price = order.executed.price
             size = order.executed.size
             timestamp = format_time(bt.num2date(order.executed.dt))
-            trade_id = self.active_trade_ids.get(symbol, '?')
             direction = "BUY" if order.isbuy() else "SELL"
             print(f"[DEBUG] Order executed: {direction} {symbol}, Trade ID: {trade_id}, "
                   f"Price: ${price:.2f}, Size: {size}, Time: {timestamp}")
@@ -247,8 +248,8 @@ class CombinedStrategy(bt.Strategy):
                 current_signal = self.combine_signals(signals)
 
                 # Debug logging
-                print(f"[DEBUG] {symbol}: position={position}, current_signal={current_signal}, "
-                      f"signals={signals}, last_direction={self.last_direction.get(symbol, '?')}")
+                # print(f"[DEBUG] {symbol}: position={position}, current_signal={current_signal}, "
+                #       f"signals={signals}, last_direction={self.last_direction.get(symbol, '?')}")
 
                 # Exit if open position is opposite of new signal
                 if position > 0 and current_signal == "SHORT" and self.strategies[0].generate_signal(d) == "SHORT":
@@ -265,7 +266,7 @@ class CombinedStrategy(bt.Strategy):
                 # Entry logic only if flat
                 if position == 0:
                     signal = self.pending_direction.get(symbol) or current_signal
-                    trade_size = 0.1
+                    trade_size = TRADE_SIZE
                     last_signal = self.last_executed_signal.get(symbol)
 
                     # Only process new, unique signals
