@@ -12,13 +12,15 @@ from strategies.EMACrossoverStrategy import EMACrossoverStrategy
 from strategies.RSIDivergenceStrategy import RSIDivergenceStrategy
 from strategies.RSIConfirmationStrategy import RSIConfirmationStrategy
 
+ENABLE_SHORTS = True
+SEND_TELLY_MSG = False
 LIVE_MODE = False  # Set False for backtest with plotting
 LIVE_MODE_START = datetime(2025, 4, 18, tzinfo=timezone.utc)      
 LIVE_MODE_END = datetime.now(timezone.utc).replace(microsecond=0)
 ASSET_TYPE = "crypto"
-TRADE_SIZE = 0.05
+TRADE_SIZE_PERCENT = 0.3
 STARTING_CASH = 5000  # Increased to ensure sufficient funds
-BACKTEST_START = '2025-01-18'          
+BACKTEST_START = '2024-01-01'          
 BACKTEST_END = '2025-04-24'
 TIMEFRAME = TimeFrame(15, TimeFrameUnit.Minute)
 
@@ -165,12 +167,13 @@ class CombinedStrategy(bt.Strategy):
         trade_id = self.active_trade_ids.get(symbol, '?')
         if order.status == order.Completed:
             price = order.executed.price
-            size = order.executed.size
+            size = abs(order.executed.size)  # Use absolute size
             timestamp = format_time(bt.num2date(order.executed.dt))
             direction = "BUY" if order.isbuy() else "SELL"
             print(f"[DEBUG] Order executed: {direction} {symbol}, Trade ID: {trade_id}, "
                   f"Price: ${price:.2f}, Size: {size}, Time: {timestamp}")
             self.last_trade_id_for_position[symbol] = trade_id
+            self.active_trade_ids[symbol] = size  # Store executed size
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
             print(f"[ERROR] Order failed: symbol={order.data._name}, Trade ID: {trade_id}, "
                   f"status={order.getstatusname()}, size={order.size}, alive={order.alive()}")
@@ -182,15 +185,12 @@ class CombinedStrategy(bt.Strategy):
             direction = self.last_direction.get(symbol, '?')
             pnl = trade.pnl
             entry_price = trade.price
-            position_size = abs(trade.size)
-
+            position_size = abs(trade.size) if trade.size != 0 else self.active_trade_ids.get(symbol, 0)
             print(f"[DEBUG] Trade closed: symbol={symbol}, direction={direction}, trade_id={trade_id}, "
-                  f"entry_price={entry_price:.2f}, pnl={pnl:.2f}, position_size={position_size}")
-
+                  f"entry_price={entry_price:.2f}, pnl={pnl:.2f}, position_size={position_size}, raw_trade_size={trade.size}")
             if position_size == 0:
                 print(f"[ERROR] Zero position size for {symbol}, Trade ID: {trade_id}")
                 return
-
             self.last_trade_id_for_position[symbol] = None
             self.active_trade_ids[symbol] = None
             # Do NOT reset self.signal_sent here to prevent duplicates
@@ -207,6 +207,9 @@ class CombinedStrategy(bt.Strategy):
     def process_signal(self, data, signal, trade_size):
         """Process a trading signal: execute trade, send alert, update tracking."""
         symbol = data._name
+        cash_available = self.broker.getcash()
+        current_price = data.close[0]
+        trade_size = round((cash_available * TRADE_SIZE_PERCENT) / current_price, 8) if current_price != 0 else 0
         if signal == "LONG":
             print(f"[DEBUG] Placing BUY order for {symbol}, size={trade_size}, cash={self.broker.getcash():.2f}")
             self.trade_id_counter[symbol] += 1
@@ -215,7 +218,7 @@ class CombinedStrategy(bt.Strategy):
             self.last_direction[symbol] = "LONG"
             self.signal_sent[symbol] = "LONG"
             self.last_executed_signal[symbol] = "LONG"
-        elif signal == "SHORT":
+        elif signal == "SHORT" and ENABLE_SHORTS:
             print(f"[DEBUG] Placing SELL order for {symbol}, size={trade_size}, cash={self.broker.getcash():.2f}")
             self.trade_id_counter[symbol] += 1
             self.active_trade_ids[symbol] = self.trade_id_counter[symbol]
@@ -225,17 +228,18 @@ class CombinedStrategy(bt.Strategy):
             self.last_executed_signal[symbol] = "SHORT"
 
         # Send Telegram alert
-        estimated_price = data.close[0]
-        timestamp = format_time(data.datetime)
-        description = self.get_sentiment_description(symbol, signal)
-        msg = self.create_entry_signal_message(
-            symbol, signal, estimated_price, timestamp,
-            self.ema_fast[data][0], self.ema_slow[data][0],
-            self.rsi[data][0], description
-        )
-        send_sync(msg)
-        self.last_signal_price[symbol] = estimated_price
-        self.pending_direction[symbol] = None
+        if SEND_TELLY_MSG:
+            estimated_price = data.close[0]
+            timestamp = format_time(data.datetime)
+            description = self.get_sentiment_description(symbol, signal)
+            msg = self.create_entry_signal_message(
+                symbol, signal, estimated_price, timestamp,
+                self.ema_fast[data][0], self.ema_slow[data][0],
+                self.rsi[data][0], description
+            )
+            send_sync(msg)
+            self.last_signal_price[symbol] = estimated_price
+            self.pending_direction[symbol] = None
 
     def next(self):
         for d in self.datas:
@@ -266,12 +270,13 @@ class CombinedStrategy(bt.Strategy):
                 # Entry logic only if flat
                 if position == 0:
                     signal = self.pending_direction.get(symbol) or current_signal
-                    trade_size = TRADE_SIZE
+                    trade_size = round((self.broker.getcash() * TRADE_SIZE_PERCENT) / d.close[0], 8) if d.close[0] != 0 else 0
                     last_signal = self.last_executed_signal.get(symbol)
 
-                    # Only process new, unique signals
+                    # Only process new, unique signals, and skip SHORT if disabled
                     if signal and signal != last_signal and self.signal_sent.get(symbol) != signal:
-                        self.process_signal(d, signal, trade_size)
+                        if signal == "LONG" or (signal == "SHORT" and ENABLE_SHORTS):
+                            self.process_signal(d, signal, trade_size)
 
             except Exception as e:
                 print(f"[ERROR] {symbol} — {type(e).__name__}: {e}")
