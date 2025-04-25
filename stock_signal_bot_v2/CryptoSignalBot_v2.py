@@ -8,12 +8,17 @@ from telegram import Bot
 import asyncio
 import pytz
 import requests
+from strategies.EMACrossoverStrategy import EMACrossoverStrategy
+from strategies.RSIDivergenceStrategy import RSIDivergenceStrategy
+from strategies.RSIConfirmationStrategy import RSIConfirmationStrategy
 
 LIVE_MODE = True  # Set False for backtest with plotting
+LIVE_MODE_START = datetime(2025, 4, 18, tzinfo=timezone.utc)      
+LIVE_MODE_END = datetime.now(timezone.utc).replace(microsecond=0)
 ASSET_TYPE = "crypto"
 STARTING_CASH = 50000  # Increased to ensure sufficient funds
-START = '2025-04-01'
-END = '2025-04-21'
+BACKTEST_START = '2025-04-18'          
+BACKTEST_END = '2025-04-21'
 TIMEFRAME = TimeFrame(15, TimeFrameUnit.Minute)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -87,6 +92,13 @@ class CombinedStrategy(bt.Strategy):
         self.last_signal_price = {}  # {symbol: price of last signal}
         self.last_executed_signal = {}  # {symbol: last executed signal type}
 
+        # Strategy registry
+        self.strategies = [
+            EMACrossoverStrategy(self.ema_fast, self.ema_slow),
+            #SIDivergenceStrategy(self.rsi, self.datas),
+            RSIConfirmationStrategy(self.rsi)
+        ]
+
     def get_sentiment_description(self, ticker, direction):
         try:
             url = "https://api.x.ai/v1/chat/completions"
@@ -122,11 +134,11 @@ class CombinedStrategy(bt.Strategy):
         if signal == "LONG":
             emoji = "🚀"
             signal_type = "LONG Signal Triggered"
-            reason = "Fast EMA crossed above Slow EMA, indicating bullish momentum"
+            reason = "Combined strategy signal, indicating bullish momentum"
         else:  # SHORT
             emoji = "📉"
             signal_type = "SHORT Signal Triggered"
-            reason = "Fast EMA crossed below Slow EMA, indicating bearish momentum"
+            reason = "Combined strategy signal, indicating bearish momentum"
         
         rsi_status = "Neutral"
         if rsi > 70:
@@ -182,39 +194,69 @@ class CombinedStrategy(bt.Strategy):
             self.active_trade_ids[symbol] = None
             # Do NOT reset self.signal_sent here to prevent duplicates
 
+    def combine_signals(self, signals):
+        """Combine signals: require all strategies to produce the same non-None signal."""
+        if not signals or None in signals:
+            return None
+        unique_signals = set(signals)
+        if len(unique_signals) == 1:
+            return unique_signals.pop()
+        return None
+
+    def process_signal(self, data, signal, trade_size):
+        """Process a trading signal: execute trade, send alert, update tracking."""
+        symbol = data._name
+        if signal == "LONG":
+            print(f"[DEBUG] Placing BUY order for {symbol}, size={trade_size}, cash={self.broker.getcash():.2f}")
+            self.trade_id_counter[symbol] += 1
+            self.active_trade_ids[symbol] = self.trade_id_counter[symbol]
+            self.buy(data=data, size=trade_size)
+            self.last_direction[symbol] = "LONG"
+            self.signal_sent[symbol] = "LONG"
+            self.last_executed_signal[symbol] = "LONG"
+        elif signal == "SHORT":
+            print(f"[DEBUG] Placing SELL order for {symbol}, size={trade_size}, cash={self.broker.getcash():.2f}")
+            self.trade_id_counter[symbol] += 1
+            self.active_trade_ids[symbol] = self.trade_id_counter[symbol]
+            self.sell(data=data, size=trade_size)
+            self.last_direction[symbol] = "SHORT"
+            self.signal_sent[symbol] = "SHORT"
+            self.last_executed_signal[symbol] = "SHORT"
+
+        # Send Telegram alert
+        estimated_price = data.close[0]
+        timestamp = format_time(data.datetime)
+        description = self.get_sentiment_description(symbol, signal)
+        msg = self.create_entry_signal_message(
+            symbol, signal, estimated_price, timestamp,
+            self.ema_fast[data][0], self.ema_slow[data][0],
+            self.rsi[data][0], description
+        )
+        send_sync(msg)
+        self.last_signal_price[symbol] = estimated_price
+        self.pending_direction[symbol] = None
+
     def next(self):
         for d in self.datas:
             try:
                 symbol = d._name
-                ema_fast = self.ema_fast[d][0]  # Current fast EMA
-                ema_slow = self.ema_slow[d][0]  # Current slow EMA
-                ema_fast_prev = self.ema_fast[d][-1]  # Previous bar's fast EMA
-                ema_slow_prev = self.ema_slow[d][-1]  # Previous bar's slow EMA
-                rsi = self.rsi[d][0]
                 position = self.getposition(d).size
 
-                # Determine signal intent from EMA crossover
-                current_signal = None
-                # LONG: Fast EMA crosses above Slow EMA
-                if ema_fast > ema_slow and ema_fast_prev <= ema_slow_prev:
-                    current_signal = "LONG"
-                # SHORT: Fast EMA crosses below Slow EMA
-                elif ema_fast < ema_slow and ema_fast_prev >= ema_slow_prev:
-                    current_signal = "SHORT"
+                # Generate signals from all strategies
+                signals = [strategy.generate_signal(d) for strategy in self.strategies]
+                current_signal = self.combine_signals(signals)
 
-                # print(f"[DEBUG] {symbol}: position={position}, current_signal={current_signal}, "
-                #     f"last_direction={self.last_direction.get(symbol, '?')}, "
-                #     f"ema_fast={ema_fast:.2f}, ema_slow={ema_slow:.2f}, "
-                #     f"ema_fast_prev={ema_fast_prev:.2f}, ema_slow_prev={ema_slow_prev:.2f}")
+                # Debug logging
+                print(f"[DEBUG] {symbol}: position={position}, current_signal={current_signal}, "
+                      f"signals={signals}, last_direction={self.last_direction.get(symbol, '?')}")
 
                 # Exit if open position is opposite of new signal
-                if position > 0 and current_signal == "SHORT":
+                if position > 0 and current_signal == "SHORT" and self.strategies[0].generate_signal(d) == "SHORT":
                     print(f"[DEBUG] Closing LONG position for {symbol}")
                     self.close(data=d)
                     self.pending_direction[symbol] = "SHORT"
                     continue
-
-                elif position < 0 and current_signal == "LONG":
+                elif position < 0 and current_signal == "LONG" and self.strategies[0].generate_signal(d) == "LONG":
                     print(f"[DEBUG] Closing SHORT position for {symbol}")
                     self.close(data=d)
                     self.pending_direction[symbol] = "LONG"
@@ -224,47 +266,14 @@ class CombinedStrategy(bt.Strategy):
                 if position == 0:
                     signal = self.pending_direction.get(symbol) or current_signal
                     trade_size = 0.1
-
-                    # Only trigger a new signal if it differs from the last executed signal
                     last_signal = self.last_executed_signal.get(symbol)
-                    if signal and signal != last_signal:
-                        if signal == "LONG" and self.signal_sent.get(symbol) != "LONG":
-                            self.last_direction[symbol] = "LONG"
-                            print(f"[DEBUG] Placing BUY order for {symbol}, size={trade_size}, cash={self.broker.getcash():.2f}")
-                            self.trade_id_counter[symbol] += 1
-                            self.active_trade_ids[symbol] = self.trade_id_counter[symbol]
-                            self.buy(data=d, size=trade_size)
-                            self.signal_sent[symbol] = "LONG"
-                            self.last_executed_signal[symbol] = "LONG"
-                            self.pending_direction[symbol] = None
 
-                            estimated_price = d.close[0]
-                            timestamp = format_time(d.datetime)
-                            description = self.get_sentiment_description(symbol, "LONG")
-                            msg = self.create_entry_signal_message(symbol, "LONG", estimated_price, timestamp, ema_fast, ema_slow, rsi, description)
-                            send_sync(msg)
-                            self.last_signal_price[symbol] = estimated_price
-
-                        elif signal == "SHORT" and self.signal_sent.get(symbol) != "SHORT":
-                            self.last_direction[symbol] = "SHORT"
-                            print(f"[DEBUG] Placing SELL order for {symbol}, size={trade_size}, cash={self.broker.getcash():.2f}")
-                            self.trade_id_counter[symbol] += 1
-                            self.active_trade_ids[symbol] = self.trade_id_counter[symbol]
-                            self.sell(data=d, size=trade_size)
-                            self.signal_sent[symbol] = "SHORT"
-                            self.last_executed_signal[symbol] = "SHORT"
-                            self.pending_direction[symbol] = None
-
-                            estimated_price = d.close[0]
-                            timestamp = format_time(d.datetime)
-                            description = self.get_sentiment_description(symbol, "SHORT")
-                            msg = self.create_entry_signal_message(symbol, "SHORT", estimated_price, timestamp, ema_fast, ema_slow, rsi, description)
-                            send_sync(msg)
-                            self.last_signal_price[symbol] = estimated_price
+                    # Only process new, unique signals
+                    if signal and signal != last_signal and self.signal_sent.get(symbol) != signal:
+                        self.process_signal(d, signal, trade_size)
 
             except Exception as e:
                 print(f"[ERROR] {symbol} — {type(e).__name__}: {e}")
-
 
 def get_data(symbol, start, end):
     try:
@@ -300,13 +309,13 @@ def run():
     cerebro.addstrategy(CombinedStrategy)
 
     if LIVE_MODE:
-        start_dt = (datetime.now(timezone.utc) - timedelta(days=2)).replace(microsecond=0)
-        end_dt = datetime.now(timezone.utc).replace(microsecond=0)
+        start_dt = LIVE_MODE_START
+        end_dt = LIVE_MODE_END
         start = start_dt.isoformat().replace('+00:00', 'Z')
         end = end_dt.isoformat().replace('+00:00', 'Z')
     else:
-        start = START
-        end = END
+        start = BACKTEST_START
+        end = BACKTEST_END
 
     for symbol in TICKERS:
         print(f"[INFO] Fetching data for {symbol} ({ASSET_TYPE})...")
