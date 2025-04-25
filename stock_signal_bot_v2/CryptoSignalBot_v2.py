@@ -12,9 +12,9 @@ from strategies.EMACrossoverStrategy import EMACrossoverStrategy
 from strategies.RSIDivergenceStrategy import RSIDivergenceStrategy
 from strategies.RSIConfirmationStrategy import RSIConfirmationStrategy
 
-ENABLE_SHORTS = False
-SEND_TELLY_MSG = False
-LIVE_MODE = False  # Set False for backtest with plotting
+ENABLE_SHORTS = True
+SEND_TELLY_MSG = True
+LIVE_MODE = True  # Set False for backtest with plotting
 LIVE_MODE_START = datetime(2025, 4, 18, tzinfo=timezone.utc)      
 LIVE_MODE_END = datetime.now(timezone.utc).replace(microsecond=0)
 ASSET_TYPE = "crypto"

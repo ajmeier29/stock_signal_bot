@@ -6,6 +6,7 @@
         "GOOG"
     ],
     "crypto": [
-        "BTC/USD"
+        "BTC/USD",
+        "ETH/USD"
     ]
 }
