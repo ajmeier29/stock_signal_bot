@@ -8,17 +8,18 @@ from telegram import Bot
 import asyncio
 import pytz
 import requests
-from strategies.EMACrossoverStrategy import EMACrossoverStrategy
+from strategies.EMACrossoverStrategy import EMACrossoverStrategy, EMACrossoverStrategy_v2
 from strategies.RSIDivergenceStrategy import RSIDivergenceStrategy
 from strategies.RSIConfirmationStrategy import RSIConfirmationStrategy
+from strategies.JoeStrategy_V1 import JoeStrategy_V1
 
 ENABLE_SHORTS = True
-SEND_TELLY_MSG = True
-LIVE_MODE = True  # Set False for backtest with plotting
+SEND_TELLY_MSG = False
+LIVE_MODE = False  # Set False for backtest with plotting
 LIVE_MODE_START = datetime(2025, 4, 18, tzinfo=timezone.utc)      
 LIVE_MODE_END = datetime.now(timezone.utc).replace(microsecond=0)
-ASSET_TYPE = "crypto"
-TRADE_SIZE_PERCENT = 0.3
+ASSET_TYPE = "crypto"  # cypto | stocks
+TRADE_SIZE_PERCENT = 0.3 
 STARTING_CASH = 5000  # Increased to ensure sufficient funds
 BACKTEST_START = '2024-01-01'          
 BACKTEST_END = '2025-04-24'
@@ -91,15 +92,18 @@ class CombinedStrategy(bt.Strategy):
         self.ema_fast = {d: bt.ind.EMA(d.close, period=self.p.fast_ema) for d in self.datas}
         self.ema_slow = {d: bt.ind.EMA(d.close, period=self.p.slow_ema) for d in self.datas}
         self.rsi = {d: bt.ind.RSI(d.close, period=self.p.rsi_period) for d in self.datas}
+        self.dma_50 = {d: bt.ind.SMA(d.close, period=50) for d in self.datas}  # 50-day DMA
+
         self.signal_sent = {}  # {symbol: signal_type}
         self.last_signal_price = {}  # {symbol: price of last signal}
         self.last_executed_signal = {}  # {symbol: last executed signal type}
 
         # Strategy registry
         self.strategies = [
-            EMACrossoverStrategy(self.ema_fast, self.ema_slow),
-            #SIDivergenceStrategy(self.rsi, self.datas),
-            RSIConfirmationStrategy(self.rsi)
+            #EMACrossoverStrategy(self.ema_fast, self.ema_slow),     # -- Combine this with RSIConfirmationStrategy for best strat
+            EMACrossoverStrategy_v2(self.ema_fast, self.ema_slow),  # -- Combine this with RSIConfirmationStrategy for best strat
+            RSIConfirmationStrategy(self.rsi),                      # -- Combine this with EMACrossoverStrategy for best strat
+            #JoeStrategy_V1(self.datas, self.dma_50, alpaca),
         ]
 
     def get_sentiment_description(self, ticker, direction):
