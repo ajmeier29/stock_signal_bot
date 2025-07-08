@@ -1,0 +1,11 @@
+{
+    "stocks": [
+        "AAPL",
+        "MSFT",
+        "AMZN",
+        "GOOG"
+    ],
+    "crypto": [
+        "BTC/USD"
+    ]
+}
